@@ -19,7 +19,6 @@ def get_db():
     return psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
 
 def init_db():
-    # Creates table on first run; safe to call on every startup
     with get_db() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS bays (
@@ -27,6 +26,12 @@ def init_db():
                 type        TEXT NOT NULL,
                 user_phone  TEXT,
                 claimed_at  FLOAT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                phone  TEXT PRIMARY KEY,
+                name   TEXT NOT NULL
             )
         """)
         for bid, btype in BAYS.items():
@@ -41,6 +46,20 @@ def get_state():
     with get_db() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM bays ORDER BY id")
         return {r["id"]: dict(r) for r in cur.fetchall()}
+
+def get_user_name(phone):
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT name FROM users WHERE phone=%s", (phone,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def save_user_name(phone, name):
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO users (phone, name) VALUES (%s, %s)
+            ON CONFLICT (phone) DO UPDATE SET name=%s
+        """, (phone, name, name))
+        conn.commit()
 
 def claim(bid, phone):
     with get_db() as conn, conn.cursor() as cur:
@@ -58,34 +77,76 @@ def elapsed(ts):
     diff = int((datetime.now().timestamp() - float(ts)) / 60)
     return f"{diff}m" if diff < 60 else f"{diff//60}h {diff%60}m"
 
-def tag(phone):
-    return f"...{phone[-4:]}" if phone else ""
-
-init_db()  # runs on every startup — safe, idempotent
+init_db()
 
 @app.route("/")
 def health(): return "EV Bot is running ⚡"
 
 @app.route("/whatsapp", methods=["POST"])
 def bot():
-    body  = request.form.get("Body", "").strip().lower()
+    body  = request.form.get("Body", "").strip()
     phone = request.form.get("From", "").replace("whatsapp:", "")
     parts = body.split()
-    cmd   = parts[0] if parts else ""
+    cmd   = parts[0].lower() if parts else ""
     resp  = MessagingResponse()
-    state = get_state()  # fresh from DB every request
+
+    # ── Name registration ────────────────────────────
+    name = get_user_name(phone)
+
+    if not name:
+        # Check if they're replying with their name
+        if body and not any(body.lower().startswith(c) for c in ["status","claim","release","who","help","myname"]):
+            save_user_name(phone, body.strip())
+            resp.message(
+                f"👋 Welcome, *{body.strip()}*!\n\n"
+                "You're all set. Here's what you can do:\n\n"
+                "⚡ *Belk Charging Station*\n"
+                "🔌 Universal: Bays 1–4\n"
+                "⚡ Tesla only: Bays 5–7\n\n"
+                "• *status* — see all bays\n"
+                "• *claim [1-7]* — claim a bay\n"
+                "• *release [1-7]* — free your bay\n"
+                "• *who* — see who's charging\n"
+                "• *help* — show this menu"
+            )
+            return str(resp)
+        else:
+            # First time user — ask for name
+            resp.message(
+                "👋 Welcome to *Belk Charging Station*!\n\n"
+                "Before we start, what's your name?\n"
+                "_(Just reply with your name, e.g. Sarah)_"
+            )
+            return str(resp)
+    # ─────────────────────────────────────────────────
+
+    # Allow users to update their name
+    if cmd == "myname" and len(parts) >= 2:
+        new_name = " ".join(parts[1:])
+        save_user_name(phone, new_name)
+        resp.message(f"✅ Name updated to *{new_name}*!")
+        return str(resp)
+
+    state = get_state()
 
     if cmd == "status":
-        lines = ["⚡ *EV Charger Status*\n", "🔌 *Universal (Bays 1–4)*"]
+        lines = ["⚡ *Belk Charging Station*\n",
+                 "🔌 *Universal (Bays 1–4)*"]
         for b in ["1","2","3","4"]:
             s = state[b]
-            status = f"{tag(s['user_phone'])} ({elapsed(s['claimed_at'])})" if s["user_phone"] else "Free"
-            lines.append(f"  {'🔴' if s['user_phone'] else '✅'} Bay {b} — {status}")
+            if s["user_phone"]:
+                n = get_user_name(s["user_phone"]) or f"...{s['user_phone'][-4:]}"
+                lines.append(f"  🔴 Bay {b} — {n} ({elapsed(s['claimed_at'])})")
+            else:
+                lines.append(f"  ✅ Bay {b} — Free")
         lines.append("\n⚡ *Tesla Only (Bays 5–7)*")
         for b in ["5","6","7"]:
             s = state[b]
-            status = f"{tag(s['user_phone'])} ({elapsed(s['claimed_at'])})" if s["user_phone"] else "Free"
-            lines.append(f"  {'🔴' if s['user_phone'] else '✅'} Bay {b} — {status}")
+            if s["user_phone"]:
+                n = get_user_name(s["user_phone"]) or f"...{s['user_phone'][-4:]}"
+                lines.append(f"  🔴 Bay {b} — {n} ({elapsed(s['claimed_at'])})")
+            else:
+                lines.append(f"  ✅ Bay {b} — Free")
         fu = sum(1 for b in ["1","2","3","4"] if not state[b]["user_phone"])
         ft = sum(1 for b in ["5","6","7"] if not state[b]["user_phone"])
         lines.append(f"\n🔌 {fu}/4 universal  ⚡ {ft}/3 Tesla free")
@@ -96,12 +157,13 @@ def bot():
         if bid not in BAYS:
             resp.message("❌ Invalid bay. Universal: 1–4 🔌  Tesla: 5–7 ⚡")
         elif state[bid]["user_phone"]:
-            resp.message(f"⚠️ Bay {bid} is taken by {tag(state[bid]['user_phone'])} ({elapsed(state[bid]['claimed_at'])}).\nSend *status* to find a free bay.")
+            n = get_user_name(state[bid]["user_phone"]) or f"...{state[bid]['user_phone'][-4:]}"
+            resp.message(f"⚠️ Bay {bid} is taken by *{n}* ({elapsed(state[bid]['claimed_at'])}).\nSend *status* to find a free bay.")
         else:
             label = "Tesla-only ⚡" if BAYS[bid] == "tesla" else "Universal 🔌"
             warn  = "\n⚠️ This is a *Tesla-only* bay." if BAYS[bid] == "tesla" else ""
             claim(bid, phone)
-            resp.message(f"✅ Bay {bid} ({label}) claimed!{warn}\nSend *release {bid}* when done.")
+            resp.message(f"✅ Bay {bid} ({label}) claimed, *{name}*!{warn}\nSend *release {bid}* when done.")
 
     elif cmd == "release" and len(parts) == 2:
         bid = parts[1]
@@ -110,11 +172,12 @@ def bot():
         elif not state[bid]["user_phone"]:
             resp.message(f"Bay {bid} is already free!")
         elif state[bid]["user_phone"] != phone:
-            resp.message("⚠️ You didn't claim this bay. Only the person who claimed it can release it.")
+            n = get_user_name(state[bid]["user_phone"]) or "someone else"
+            resp.message(f"⚠️ Bay {bid} was claimed by *{n}*. Only they can release it.")
         else:
             t = elapsed(state[bid]["claimed_at"])
             release(bid)
-            resp.message(f"🔌 Bay {bid} released after {t}. Thanks!")
+            resp.message(f"🔌 Bay {bid} released after {t}. Thanks, *{name}*!")
 
     elif cmd == "who":
         lines = ["👤 *Currently charging:*\n"]
@@ -122,20 +185,22 @@ def bot():
         for bid, btype in BAYS.items():
             s = state[bid]
             if s["user_phone"]:
+                n = get_user_name(s["user_phone"]) or f"...{s['user_phone'][-4:]}"
                 icon = "⚡" if btype == "tesla" else "🔌"
-                lines.append(f"{icon} Bay {bid}: {tag(s['user_phone'])} · {elapsed(s['claimed_at'])}")
+                lines.append(f"{icon} Bay {bid}: *{n}* · {elapsed(s['claimed_at'])}")
                 found = True
         resp.message("\n".join(lines) if found else "All 7 bays are free! 🎉")
 
     else:
         resp.message(
-            "⚡ *EV Charger Bot*\n\n"
+            "⚡ *Belk Charging Station*\n\n"
             "🔌 Universal: Bays 1–4\n"
             "⚡ Tesla only: Bays 5–7\n\n"
             "• *status* — see all bays\n"
             "• *claim [1-7]* — claim a bay\n"
             "• *release [1-7]* — free your bay\n"
             "• *who* — see who's charging\n"
+            "• *myname John* — update your name\n"
             "• *help* — show this menu"
         )
 
