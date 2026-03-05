@@ -206,7 +206,7 @@ def bot():
             label = "Tesla-only ⚡" if BAYS[bid] == "tesla" else "Universal 🔌"
             warn  = "\n⚠️ This is a *Tesla-only* bay." if BAYS[bid] == "tesla" else ""
             claim(bid, phone)
-            resp.message(f"✅ Bay {bid} ({label}) claimed, *{name}*!{warn}\nSend *release {bid}* when done.")
+            resp.message(f"✅ Bay {bid} claimed, *{name}*!\nSend *release {bid}* when done.")
 
     elif cmd == "release" and len(parts) == 2:
         bid = parts[1]
