@@ -87,10 +87,10 @@ TWILIO_TOKEN  = os.environ["TWILIO_AUTH_TOKEN"]
 TWILIO_NUMBER = os.environ["TWILIO_WHATSAPP_NUMBER"]  # e.g. whatsapp:+14155238886
 twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
 
-OVERTIME_HOURS = 7  # alert after this many hours
+OVERTIME_HOURS = 5  # alert after this many hours
 
 def check_overtime():
-    """Runs every 30 min — sends WhatsApp alert if anyone has been on 7+ hours."""
+    """Runs every 30 min — sends WhatsApp alert if anyone has been on 5+ hours."""
     try:
         state = get_state()
         now   = datetime.now().timestamp()
@@ -240,8 +240,8 @@ def bot():
             "🔌 Universal: Bays 1–4\n"
             "⚡ Tesla only: Bays 5–7\n\n"
             "• *status* — see all bays\n"
-            "• *claim [1-7]* — claim a bay\n"
-            "• *release [1-7]* — free your bay\n"
+            "• *claim 1* — claim a bay\n"
+            "• *release 1* — free your bay\n"
             "• *who* — see who's charging\n"
             "• *myname John* — update your name\n"
             "• *help* — show this menu"
