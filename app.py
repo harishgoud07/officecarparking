@@ -1,5 +1,7 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.rest import Client
+from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import os, psycopg2, psycopg2.extras
 
@@ -79,6 +81,47 @@ def elapsed(ts):
 
 init_db()
 
+# ── Twilio client for outbound alerts ────────────────
+TWILIO_SID    = os.environ["TWILIO_ACCOUNT_SID"]
+TWILIO_TOKEN  = os.environ["TWILIO_AUTH_TOKEN"]
+TWILIO_NUMBER = os.environ["TWILIO_WHATSAPP_NUMBER"]  # e.g. whatsapp:+14155238886
+twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
+
+OVERTIME_HOURS = 7  # alert after this many hours
+
+def check_overtime():
+    """Runs every 30 min — sends WhatsApp alert if anyone has been on 7+ hours."""
+    try:
+        state = get_state()
+        now   = datetime.now().timestamp()
+        for bid, bay in state.items():
+            if not bay["user_phone"] or not bay["claimed_at"]:
+                continue
+            hours = (now - float(bay["claimed_at"])) / 3600
+            if hours >= OVERTIME_HOURS:
+                name  = get_user_name(bay["user_phone"]) or f"...{bay['user_phone'][-4:]}"
+                btype = "Tesla-only ⚡" if BAYS[bid] == "tesla" else "Universal 🔌"
+                twilio_client.messages.create(
+                    from_=TWILIO_NUMBER,
+                    to=f"whatsapp:{bay['user_phone']}",
+                    body=(
+                        f"⏰ *Belk Charging Station Alert*\n\n"
+                        f"Hi *{name}*, you've had Bay {bid} ({btype}) "
+                        f"for *{int(hours)} hours*.\n\n"
+                        f"Please release it if you're done so others can use it.\n"
+                        f"Reply *release {bid}* when done. 🙏"
+                    )
+                )
+    except Exception as e:
+        print(f"Overtime check error: {e}")
+
+# Run check every 30 minutes
+scheduler = BackgroundScheduler()
+scheduler.add_job(check_overtime, "interval", minutes=30)
+scheduler.start()
+
+
+
 @app.route("/")
 def health(): return "EV Bot is running ⚡"
 
@@ -104,8 +147,8 @@ def bot():
                 "🔌 Universal: Bays 1–4\n"
                 "⚡ Tesla only: Bays 5–7\n\n"
                 "• *status* — see all bays\n"
-                "• *claim [1-7]* — claim a bay\n"
-                "• *release [1-7]* — free your bay\n"
+                "• *claim 1* — claim a bay\n"
+                "• *release 1* — free your bay\n"
                 "• *who* — see who's charging\n"
                 "• *help* — show this menu"
             )
